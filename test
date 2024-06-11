@@ -1,0 +1,365 @@
+php artisan make:model Admin -m
+php artisan make:model Vendor -m
+php artisan make:model Category -m
+php artisan make:model Subcategory -m
+php artisan make:model Token -m
+
+
+Schema::create('admins', function (Blueprint $table) {
+    $table->id();
+    $table->string('name');
+    $table->string('email')->unique();
+    $table->string('password');
+    $table->timestamps();
+});
+
+
+Schema::create('vendors', function (Blueprint $table) {
+    $table->id();
+    $table->string('name');
+    $table->string('email')->unique();
+    $table->string('password');
+    $table->boolean('is_approved')->default(false);
+    $table->timestamps();
+});
+
+
+Schema::create('categories', function (Blueprint $table) {
+    $table->id();
+    $table->string('name');
+    $table->string('image');
+    $table->boolean('is_approved')->default(false);
+    $table->timestamps();
+});
+
+
+Schema::create('subcategories', function (Blueprint $table) {
+    $table->id();
+    $table->foreignId('category_id')->constrained()->onDelete('cascade');
+    $table->string('name');
+    $table->timestamps();
+});
+
+
+Schema::create('tokens', function (Blueprint $table) {
+    $table->id();
+    $table->string('token')->unique();
+    $table->morphs('tokenable'); // This will create tokenable_type and tokenable_id columns
+    $table->timestamps();
+});
+php artisan migrate
+
+
+class Admin extends Authenticatable
+{
+    use HasFactory, Notifiable;
+
+    protected $fillable = ['name', 'email', 'password'];
+
+    protected $hidden = ['password', 'remember_token'];
+
+    protected $casts = ['email_verified_at' => 'datetime'];
+
+    public function tokens()
+    {
+        return $this->morphMany(Token::class, 'tokenable');
+    }
+}
+
+
+class Vendor extends Authenticatable
+{
+    use HasFactory, Notifiable;
+
+    protected $fillable = ['name', 'email', 'password', 'is_approved'];
+
+    protected $hidden = ['password', 'remember_token'];
+
+    protected $casts = ['email_verified_at' => 'datetime'];
+
+    public function tokens()
+    {
+        return $this->morphMany(Token::class, 'tokenable');
+    }
+}
+
+
+class Category extends Model
+{
+    use HasFactory;
+
+    protected $fillable = ['name', 'image', 'is_approved'];
+
+    public function subcategories()
+    {
+        return $this->hasMany(Subcategory::class);
+    }
+}
+
+
+class Subcategory extends Model
+{
+    use HasFactory;
+
+    protected $fillable = ['category_id', 'name'];
+
+    public function category()
+    {
+        return $this->belongsTo(Category::class);
+    }
+}
+
+
+class Token extends Model
+{
+    use HasFactory;
+
+    protected $fillable = ['token'];
+
+    public function tokenable()
+    {
+        return $this->morphTo();
+    }
+}
+
+
+use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AdminController;
+use App\Http\Controllers\Api\VendorController;
+
+Route::post('register/vendor', [AuthController::class, 'registerVendor']);
+Route::post('login/vendor', [AuthController::class, 'loginVendor']);
+
+// Comment out or remove this line after initial admin registration
+Route::post('register/admin', [AuthController::class, 'registerAdmin']);
+
+Route::post('login/admin', [AuthController::class, 'loginAdmin']);
+
+Route::middleware('auth:api')->group(function () {
+    Route::post('admin/approve/vendor/{id}', [AdminController::class, 'approveVendor']);
+    Route::post('vendor/category', [VendorController::class, 'createCategory']);
+    Route::post('admin/approve/category/{id}', [AdminController::class, 'approveCategory']);
+    Route::post('vendor/subcategory', [VendorController::class, 'selectSubcategory']);
+});
+
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Admin;
+use App\Models\Vendor;
+use App\Models\Token;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Auth;
+
+class AuthController extends Controller
+{
+    public function registerVendor(Request $request)
+    {
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:vendors',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $vendor = Vendor::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+        ]);
+
+        // Send email verification (implement this as needed)
+
+        return response()->json(['message' => 'Vendor registered successfully!']);
+    }
+
+    public function loginVendor(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|string|email',
+            'password' => 'required|string',
+        ]);
+
+        $vendor = Vendor::where('email', $request->email)->first();
+
+        if (!$vendor || !Hash::check($request->password, $vendor->password)) {
+            return response()->json(['message' => 'Invalid credentials'], 401);
+        }
+
+        if (!$vendor->is_approved) {
+            return response()->json(['message' => 'Your account is not approved yet.'], 403);
+        }
+
+        $token = Str::random(60);
+        $vendor->tokens()->create(['token' => hash('sha256', $token)]);
+
+        return response()->json(['token' => $token]);
+    }
+
+    public function registerAdmin(Request $request)
+    {
+        // Check if an admin already exists
+        if (Admin::count() > 0) {
+            return response()->json(['message' => 'Admin already exists.'], 403);
+        }
+
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:admins',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $admin = Admin::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+        ]);
+
+        return response()->json(['message' => 'Admin registered successfully!']);
+    }
+
+    public function loginAdmin(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|string|email',
+            'password' => 'required|string',
+        ]);
+
+        $admin = Admin::where('email', $request->email)->first();
+
+        if (!$admin || !Hash::check($request->password, $admin->password)) {
+            return response()->json(['message' => 'Invalid credentials'], 401);
+        }
+
+        $token = Str::random(60);
+        $admin->tokens()->create(['token' => hash('sha256', $token)]);
+
+        return response()->json(['token' => $token]);
+    }
+}
+
+
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Category;
+use App\Models\Vendor;
+use Illuminate\Http\Request;
+
+class AdminController extends Controller
+{
+    public function approveVendor($id)
+    {
+        $vendor = Vendor::findOrFail($id);
+        $vendor->is_approved = true;
+        $vendor->save();
+
+        // Notify vendor about approval (implement this as needed)
+
+        return response()->json(['message' => 'Vendor approved successfully!']);
+    }
+
+    public function approveCategory($id)
+    {
+        $category = Category::findOrFail($id);
+        $category->is_approved = true;
+        $category->save();
+
+        // Notify vendor about category approval (implement this as needed)
+
+        return response()->json(['message' => 'Category approved successfully!']);
+    }
+}
+
+
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Category;
+use App\Models\Subcategory;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class VendorController extends Controller
+{
+    public function createCategory(Request $request)
+    {
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'image' => 'required|image',
+        ]);
+
+        $imagePath = $request->file('image')->store('categories', 'public');
+
+        $category = Category::create([
+            'name' => $request->name,
+            'image' => $imagePath,
+        ]);
+
+        // Send notification to admin for approval (implement this as needed)
+
+        return response()->json(['message' => 'Category created successfully!']);
+    }
+
+    public function selectSubcategory(Request $request)
+    {
+        $request->validate([
+            'category_id' => 'required|exists:categories,id',
+            'subcategories' => 'required|array',
+        ]);
+
+        $category = Category::findOrFail($request->category_id);
+
+        foreach ($request->subcategories as $subcat) {
+            $subcategory = new Subcategory([
+                'category_id' => $category->id,
+                'name' => $subcat,
+            ]);
+            $subcategory->save();
+        }
+
+        return response()->json(['message' => 'Subcategories selected successfully.']);
+    }
+}
+
+
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Http\Request;
+use App\Models\Token;
+use Illuminate\Support\Facades\Auth;
+
+class CheckToken
+{
+    public function handle(Request $request, Closure $next)
+    {
+        $token = $request->header('Authorization');
+
+        if (!$token) {
+            return response()->json(['message' => 'Token not provided'], 401);
+        }
+
+        $token = hash('sha256', $token);
+        $tokenModel = Token::where('token', $token)->first();
+
+        if (!$tokenModel) {
+            return response()->json(['message' => 'Invalid token'], 401);
+        }
+
+        Auth::login($tokenModel->tokenable);
+
+        return $next($request);
+    }
+}
+
+
+protected $routeMiddleware = [
+    // Other middleware
+    'auth.api' => \App\Http\Middleware\CheckToken::class,
+];
